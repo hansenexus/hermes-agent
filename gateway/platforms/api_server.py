@@ -656,6 +656,18 @@ except ImportError:
     _cron_trigger = None
 
 
+def _inspect_load_config() -> dict:
+    """Load the gateway user config for the inspect endpoints.
+
+    Indirection point so tests can substitute a config without importing
+    the full gateway runtime; ``gateway.run`` is already imported in any
+    running gateway process, so the lazy import is free at request time.
+    """
+    from gateway.run import _load_gateway_config
+
+    return _load_gateway_config() or {}
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -678,6 +690,20 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
+        )
+        # systemd unit whose journal backs GET /v1/logs (inspect endpoint).
+        self._logs_unit: str = str(
+            extra.get("logs_unit", os.getenv("API_SERVER_LOGS_UNIT", "hermes-gateway.service")),
+        )
+        # Opt-in: let /v1/chat/completions requests override the configured
+        # gateway model with a provider-scoped id (changes cost semantics,
+        # so it is off by default).
+        raw_override = extra.get(
+            "allow_model_override", os.getenv("API_SERVER_ALLOW_MODEL_OVERRIDE", ""),
+        )
+        self._allow_model_override: bool = (
+            raw_override is True
+            or str(raw_override).strip().lower() in ("1", "true", "yes", "on")
         )
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
@@ -941,6 +967,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -963,7 +990,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
-        model = _resolve_gateway_model()
+        model = model_override or _resolve_gateway_model()
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -1220,6 +1247,19 @@ class APIServerAdapter(BasePlatformAdapter):
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
+        # Opt-in model passthrough: a provider-scoped id (contains "/", e.g.
+        # "openrouter/auto") overrides the configured gateway model for this
+        # request only. Bare logical names (profile echoes from OpenAI-style
+        # clients) always keep the configured default.
+        model_override = (
+            model_name
+            if (
+                self._allow_model_override
+                and isinstance(model_name, str)
+                and "/" in model_name
+            )
+            else None
+        )
         created = int(time.time())
 
         if stream:
@@ -1299,6 +1339,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
+                model_override=model_override,
                 stream_delta_callback=_on_delta,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
@@ -1322,6 +1363,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
+                model_override=model_override,
                 gateway_session_key=gateway_session_key,
             )
 
@@ -2833,6 +2875,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -2849,6 +2892,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         def _run():
             agent = self._create_agent(
+                model_override=model_override,
                 ephemeral_system_prompt=ephemeral_system_prompt,
                 session_id=session_id,
                 stream_delta_callback=stream_delta_callback,
@@ -2948,6 +2992,155 @@ class APIServerAdapter(BasePlatformAdapter):
             # _thinking and subagent_progress are intentionally not forwarded
 
         return _callback
+
+    # ------------------------------------------------------------------
+    # Inspect endpoints (read-only control-plane views)
+    #
+    # Four GET endpoints for external dashboards and control planes:
+    # recent agent runs, MCP server reachability, a redacted config
+    # summary, and a tail of the gateway's service log. All four require
+    # the same bearer auth as the rest of /v1.
+    # ------------------------------------------------------------------
+
+    _INSPECT_JOB_STATUS_MAP = {
+        "queued": "queued",
+        "running": "running",
+        "stopping": "running",
+        "completed": "succeeded",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "error": "failed",
+        "cancelled": "failed",
+        "stopped": "failed",
+    }
+
+    async def _handle_inspect_jobs(self, request: "web.Request") -> "web.Response":
+        """GET /v1/jobs - recent and active agent runs, dashboard-shaped."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        now = time.time()
+        jobs = []
+        for run_id, meta in list(self._run_statuses.items()):
+            raw_status = str(meta.get("status", "running"))
+            job = {
+                "id": run_id,
+                "task": str(
+                    meta.get("input_preview")
+                    or meta.get("last_event")
+                    or "agent run"
+                )[:200],
+                "status": self._INSPECT_JOB_STATUS_MAP.get(raw_status, "running"),
+            }
+            model = meta.get("model")
+            if isinstance(model, str) and model:
+                job["model"] = model
+            created = meta.get("created_at")
+            if created:
+                job["createdAt"] = int(float(created) * 1000)
+                ended = meta.get("updated_at") if job["status"] in ("succeeded", "failed") else now
+                job["durationMs"] = max(0, int((float(ended or now) - float(created)) * 1000))
+            jobs.append(job)
+        jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
+        return web.json_response(jobs)
+
+    async def _handle_inspect_mcp_status(self, request: "web.Request") -> "web.Response":
+        """GET /v1/mcp/status - configured MCP servers with a reachability probe."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        servers = _inspect_load_config().get("mcp_servers") or {}
+
+        import aiohttp
+
+        async def _probe(name, entry):
+            url = entry.get("url") if isinstance(entry, dict) else None
+            if not url:
+                # stdio/command-launched server: no HTTP endpoint to probe.
+                return {"name": name, "status": "degraded", "endpoint": "stdio/local"}
+            try:
+                timeout = aiohttp.ClientTimeout(total=2.0)
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.get(url) as resp:
+                        # Any HTTP answer (incl. 404/405 on the MCP path) means
+                        # the server process is up and reachable.
+                        status = "connected" if resp.status < 500 else "degraded"
+            except Exception:
+                status = "disconnected"
+            return {"name": name, "status": status, "endpoint": url}
+
+        results = await asyncio.gather(*(_probe(n, e) for n, e in servers.items()))
+        return web.json_response(list(results))
+
+    async def _handle_inspect_config(self, request: "web.Request") -> "web.Response":
+        """GET /v1/config - redacted config summary.
+
+        The response is built from an allowlist, never by filtering the
+        raw config, so api keys and tokens are excluded by construction.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        cfg = _inspect_load_config()
+
+        model = cfg.get("model") or {}
+        fallbacks = cfg.get("fallback_providers") or []
+        fallback = fallbacks[0] if isinstance(fallbacks, list) and fallbacks else {}
+        smart = cfg.get("smart_model_routing") or {}
+        smart_cheap = smart.get("cheap_model")
+        if isinstance(smart_cheap, dict):
+            smart_cheap = smart_cheap.get("model")
+        skills = cfg.get("skills") or {}
+        dashboard = cfg.get("dashboard") or {}
+        out = {
+            "primaryModel": model.get("default"),
+            "primaryProvider": model.get("provider"),
+            "contextLength": model.get("context_length"),
+            "fallbackModel": fallback.get("model") if isinstance(fallback, dict) else None,
+            "smartRouterModel": smart_cheap,
+            "smartRoutingEnabled": bool(smart.get("enabled")),
+            "mcpServerCount": len(cfg.get("mcp_servers") or {}),
+            "skillsDirCount": len(skills.get("external_dirs") or []),
+            "apiPort": self._port,
+            "dashboardPort": dashboard.get("port"),
+            "storage": "sqlite",
+            "configVersion": cfg.get("_config_version"),
+        }
+        return web.json_response({k: v for k, v in out.items() if v is not None})
+
+    async def _handle_inspect_logs(self, request: "web.Request") -> "web.Response":
+        """GET /v1/logs?lines=N - journalctl tail of the gateway's own unit."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            lines = int(request.query.get("lines", "100"))
+        except ValueError:
+            lines = 100
+        lines = max(1, min(lines, 1000))
+
+        env = dict(os.environ)
+        # journalctl --user needs the user bus; harmless if already set.
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "journalctl", "--user", "-u", self._logs_unit,
+                "-n", str(lines), "--no-pager", "-o", "cat",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        if proc.returncode != 0:
+            detail = (err or b"").decode(errors="replace")[:500]
+            return web.json_response({"error": f"journalctl failed: {detail}"}, status=500)
+        return web.json_response((out or b"").decode(errors="replace").splitlines())
 
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
@@ -3060,6 +3253,8 @@ class APIServerAdapter(BasePlatformAdapter):
             created_at=created_at,
             session_id=session_id,
             model=body.get("model", self._model_name),
+            # Task label surfaced by the GET /v1/jobs inspect endpoint.
+            input_preview=user_message[:200],
         )
 
         async def _run_and_close():
@@ -3505,6 +3700,11 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Inspect endpoints (read-only control-plane views)
+            self._app.router.add_get("/v1/jobs", self._handle_inspect_jobs)
+            self._app.router.add_get("/v1/mcp/status", self._handle_inspect_mcp_status)
+            self._app.router.add_get("/v1/config", self._handle_inspect_config)
+            self._app.router.add_get("/v1/logs", self._handle_inspect_logs)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
