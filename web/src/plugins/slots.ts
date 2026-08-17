@@ -57,7 +57,7 @@ import React, { Fragment, useEffect, useState } from "react";
  *  - `chat:top`         — top of /chat page (above the composer, when embedded chat is on)
  *  - `chat:bottom`      — bottom of /chat page
  */
-export const KNOWN_SLOT_NAMES = [
+const KNOWN_SLOT_NAMES = [
   // Shell-wide
   "backdrop",
   "header-left",
@@ -135,12 +135,12 @@ export function registerSlot(
 
 /** Read current entries for a slot. Returns a copy so callers can't mutate
  *  registry state. */
-export function getSlotEntries(slot: string): SlotEntry[] {
+function getSlotEntries(slot: string): SlotEntry[] {
   return (_slotRegistry.get(slot) ?? []).slice();
 }
 
 /** Subscribe to registry changes. Returns an unsubscribe function. */
-export function onSlotRegistered(fn: SlotListener): () => void {
+function onSlotRegistered(fn: SlotListener): () => void {
   _slotListeners.add(fn);
   return () => {
     _slotListeners.delete(fn);
@@ -149,7 +149,7 @@ export function onSlotRegistered(fn: SlotListener): () => void {
 
 /** Clear a specific plugin's slot registrations. Useful for HMR /
  *  plugin reload flows — not wired in by default. */
-export function unregisterPluginSlots(plugin: string): void {
+function unregisterPluginSlots(plugin: string): void {
   let changed = false;
   for (const [slot, entries] of _slotRegistry.entries()) {
     const kept = entries.filter((e) => e.plugin !== plugin);

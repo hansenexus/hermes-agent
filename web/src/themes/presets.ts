@@ -53,7 +53,7 @@ export const defaultTheme: DashboardTheme = {
   layout: DEFAULT_LAYOUT,
 };
 
-export const midnightTheme: DashboardTheme = {
+const midnightTheme: DashboardTheme = {
   name: "midnight",
   label: "Midnight",
   description: "Deep blue-violet with cool accents",
@@ -78,7 +78,7 @@ export const midnightTheme: DashboardTheme = {
   },
 };
 
-export const emberTheme: DashboardTheme = {
+const emberTheme: DashboardTheme = {
   name: "ember",
   label: "Ember",
   description: "Warm crimson and bronze — forge vibes",
@@ -106,7 +106,7 @@ export const emberTheme: DashboardTheme = {
   },
 };
 
-export const monoTheme: DashboardTheme = {
+const monoTheme: DashboardTheme = {
   name: "mono",
   label: "Mono",
   description: "Clean grayscale — minimal and focused",
@@ -130,7 +130,7 @@ export const monoTheme: DashboardTheme = {
   },
 };
 
-export const cyberpunkTheme: DashboardTheme = {
+const cyberpunkTheme: DashboardTheme = {
   name: "cyberpunk",
   label: "Cyberpunk",
   description: "Neon green on black — matrix terminal",
@@ -159,7 +159,7 @@ export const cyberpunkTheme: DashboardTheme = {
   },
 };
 
-export const roseTheme: DashboardTheme = {
+const roseTheme: DashboardTheme = {
   name: "rose",
   label: "Rosé",
   description: "Soft pink and warm ivory — easy on the eyes",
@@ -188,7 +188,7 @@ export const roseTheme: DashboardTheme = {
  * line-height, and ``spacious`` density so every rem-based size in the
  * dashboard scales up. For users who find the default 15px UI too dense.
  */
-export const defaultLargeTheme: DashboardTheme = {
+const defaultLargeTheme: DashboardTheme = {
   name: "default-large",
   label: "Hermes Teal (Large)",
   description: "Hermes Teal with bigger fonts and roomier spacing",

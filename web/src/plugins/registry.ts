@@ -80,7 +80,7 @@ export function onPluginRegistered(fn: RegistryListener): () => void {
 }
 
 /** Get current count of registered plugins. */
-export function getRegisteredCount(): number {
+function getRegisteredCount(): number {
   return _registered.size;
 }
 
