@@ -1,0 +1,20 @@
+# Orca worktree hooks — run in each fresh Orca-managed worktree.
+#
+# GUARDRAIL: on the hn-agent runtime this repo's worktrees live in the same home
+# as the LIVE Hermes gateway, and Orca launches agents with
+# --dangerously-skip-permissions. A lane must never read or write ~/.hermes/
+# (config.yaml, .env, .env.refs, SOUL.md), and must never start, stop, or
+# restart hermes-gateway.service or hermes-dashboard.service. Work the checkout
+# only; deployment is a separate, human-run step.
+#
+# Docs: hn-infra/scripts/orca/README.md
+scripts:
+  setup: |
+    export PATH="$HOME/.local/bin:$HOME/node22/bin:$PATH"
+    cd "${ORCA_WORKTREE_PATH:-$PWD}"
+    uv sync --frozen || echo "orca-setup: uv sync --frozen failed — run it manually before testing"
+    npm ci || echo "orca-setup: npm ci failed — run it manually before building the dashboard"
+issueCommand: |
+  Work the GitHub issue at {{artifact_url}}. Read the issue and its comments
+  first, follow this repo's AGENTS.md conventions, and open a PR when done.
+  Never touch ~/.hermes/ or the hermes-gateway/hermes-dashboard services.
