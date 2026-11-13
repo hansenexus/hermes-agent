@@ -32,11 +32,14 @@ MAX_LOG_LINES = 1000
 MCP_PROBE_TIMEOUT_S = 2.0
 TASK_LABEL_MAX = 200
 
-# Upstream run status vocabulary -> the four states the dashboard contract knows.
+# Upstream run status vocabulary -> the dashboard contract's states (queued, running, paused,
+# succeeded, failed).
 JOB_STATUS_MAP = {
     "queued": "queued",
     "running": "running",
     "stopping": "running",
+    "pausing": "running",  # still running until it reaches a safe boundary (hermes-agent#2)
+    "paused": "paused",
     "waiting_for_approval": "running",
     "completed": "succeeded",
     "succeeded": "succeeded",
@@ -101,7 +104,10 @@ async def handle_jobs(adapter, request: "web.Request") -> "web.Response":
     if auth_err:
         return auth_err
     now = time.time()
-    jobs = [_job_view(run_id, meta, now) for run_id, meta in list(adapter._run_statuses.items())]
+    from gateway.platforms.api_server_run_pause import overlay_status
+
+    jobs = [_job_view(run_id, overlay_status(adapter, run_id, meta), now)
+            for run_id, meta in list(adapter._run_statuses.items())]
     jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
     return web.json_response(jobs)
 
