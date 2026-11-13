@@ -12,8 +12,10 @@ scripts:
   setup: |
     export PATH="$HOME/.local/bin:$HOME/node22/bin:$PATH"
     cd "${ORCA_WORKTREE_PATH:-$PWD}"
-    uv sync --frozen || echo "orca-setup: uv sync --frozen failed — run it manually before testing"
-    npm ci || echo "orca-setup: npm ci failed — run it manually before building the dashboard"
+    # messaging extra brings aiohttp (gateway tests); dev group brings pytest.
+    uv sync --frozen --extra messaging --group dev || echo "orca-setup: uv sync --frozen failed — run it manually before testing"
+    # v0.23 moved the JS side to a pnpm workspace (no root package-lock.json any more).
+    pnpm install --frozen-lockfile || echo "orca-setup: pnpm install --frozen-lockfile failed — run it manually before building the desktop/dashboard"
 issueCommand: |
   Work the GitHub issue at {{artifact_url}}. Read the issue and its comments
   first, follow this repo's AGENTS.md conventions, and open a PR when done.
